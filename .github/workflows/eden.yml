@@ -1,0 +1,166 @@
+name: Build Eden Pause Edition
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone Eden
+        run: |
+          git clone --recursive https://github.com/eden-emulator/mirror.git eden
+          cd eden
+          git checkout 37fe911952
+          git submodule update --init --recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Install Android dependencies
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "cmake;3.22.1" \
+            "ndk;27.2.12479018"
+
+      - name: Add Pause Button
+        working-directory: eden
+        run: |
+
+          mkdir -p src/android/app/src/main/res/drawable
+
+          cat > src/android/app/src/main/res/drawable/pause_button_background.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android"
+              android:shape="oval">
+
+              <solid android:color="#CC202124"/>
+
+              <stroke
+                  android:width="2dp"
+                  android:color="#FFFFFFFF"/>
+
+              <size
+                  android:width="58dp"
+                  android:height="58dp"/>
+
+          </shape>
+          EOF
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          layout = Path(
+              "src/android/app/src/main/res/layout/activity_emulation.xml"
+          )
+
+          layout.write_text(r'''<?xml version="1.0" encoding="utf-8"?>
+
+          <FrameLayout
+              xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:app="http://schemas.android.com/apk/res-auto"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent">
+
+              <androidx.fragment.app.FragmentContainerView
+                  android:id="@+id/fragment_container"
+                  android:name="androidx.navigation.fragment.NavHostFragment"
+                  android:layout_width="match_parent"
+                  android:layout_height="match_parent"
+                  android:keepScreenOn="true"
+                  app:defaultNavHost="true" />
+
+              <TextView
+                  android:id="@+id/pause_button"
+                  android:layout_width="58dp"
+                  android:layout_height="58dp"
+                  android:layout_gravity="top|end"
+                  android:layout_marginTop="120dp"
+                  android:layout_marginEnd="18dp"
+                  android:background="@drawable/pause_button_background"
+                  android:clickable="true"
+                  android:focusable="true"
+                  android:gravity="center"
+                  android:text="⏸"
+                  android:textColor="#FFFFFF"
+                  android:textSize="25sp"
+                  android:elevation="20dp" />
+
+          </FrameLayout>
+          ''')
+
+          activity = Path(
+              "src/android/app/src/main/java/"
+              "org/yuzu/yuzu_emu/activities/EmulationActivity.kt"
+          )
+
+          text = activity.read_text()
+
+          old = """        binding = ActivityEmulationBinding.inflate(layoutInflater)
+          setContentView(binding.root)
+          """
+
+          new = """        binding = ActivityEmulationBinding.inflate(layoutInflater)
+          setContentView(binding.root)
+
+          val pauseButton = findViewById<android.widget.TextView>(
+              R.id.pause_button
+          )
+
+          pauseButton.setOnClickListener {
+              if (NativeLibrary.isPaused()) {
+                  NativeLibrary.unpauseEmulation()
+                  pauseButton.text = "⏸"
+              } else {
+                  NativeLibrary.pauseEmulation()
+                  pauseButton.text = "▶"
+              }
+          }
+          """
+
+          if old not in text:
+              raise SystemExit(
+                  "Could not find EmulationActivity insertion point"
+              )
+
+          text = text.replace(old, new, 1)
+
+          activity.write_text(text)
+          PY
+
+      - name: Build Eden Optimized
+        working-directory: eden
+        run: |
+          chmod +x src/android/gradlew
+          chmod +x .ci/android/build.sh
+
+          .ci/android/build.sh \
+            --target optimized \
+            --build-type Release
+
+      - name: Find APK
+        working-directory: eden
+        run: |
+          echo "===== APK FILES ====="
+          find artifacts -type f -name "*.apk" -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Eden-Optimized-Pause
+          path: eden/artifacts/*.apk
+          if-no-files-found: error
